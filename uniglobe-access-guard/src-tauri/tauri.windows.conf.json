@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["nsis", "msi"],
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "languages": ["English"],
+        "compression": "lzma",
+        "startMenuFolder": "UniGlobe"
+      },
+      "wix": {
+        "upgradeCode": "badf8b78-b83e-524b-83d2-8437d792c520",
+        "language": "en-US"
+      }
+    }
+  }
+}

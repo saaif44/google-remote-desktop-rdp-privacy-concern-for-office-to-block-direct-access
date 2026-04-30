@@ -1,0 +1,29 @@
+{
+  "name": "uniglobe-access-guard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:mac": "tauri build --bundles app,dmg",
+    "build:mac:universal": "rustup target add aarch64-apple-darwin x86_64-apple-darwin && tauri build --target universal-apple-darwin --bundles app,dmg",
+    "build:windows": "tauri build --bundles nsis,msi",
+    "check": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "latest",
+    "@vitejs/plugin-react": "latest",
+    "vite": "latest",
+    "typescript": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "lucide-react": "latest"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest"
+  }
+}
