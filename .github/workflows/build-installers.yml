@@ -6,6 +6,9 @@ on:
     tags:
       - "v*"
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 defaults:
   run:
     working-directory: uniglobe-access-guard
@@ -14,6 +17,8 @@ jobs:
   macos:
     name: macOS DMG
     runs-on: macos-latest
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,12 +46,14 @@ jobs:
         with:
           name: uniglobe-access-guard-macos
           path: |
-            uniglobe-access-guard/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
-            uniglobe-access-guard/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+            ${{ runner.temp }}/cargo-target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            ${{ runner.temp }}/cargo-target/universal-apple-darwin/release/bundle/macos/*.app
 
   windows:
     name: Windows NSIS and MSI
     runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: D:\cargo-target
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -72,5 +79,5 @@ jobs:
         with:
           name: uniglobe-access-guard-windows
           path: |
-            uniglobe-access-guard/src-tauri/target/release/bundle/nsis/*.exe
-            uniglobe-access-guard/src-tauri/target/release/bundle/msi/*.msi
+            D:\cargo-target\release\bundle\nsis\*.exe
+            D:\cargo-target\release\bundle\msi\*.msi

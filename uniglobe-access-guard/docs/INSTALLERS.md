@@ -65,4 +65,7 @@ The GitHub Actions workflow in `.github/workflows/build-installers.yml` builds:
 - macOS universal `.app` and `.dmg`
 - Windows NSIS `.exe` and WiX `.msi`
 
+The workflow sets a short `CARGO_TARGET_DIR` on Windows (`D:\cargo-target`) to
+avoid `link.exe` failures caused by long GitHub Actions checkout paths.
+
 Run it manually from GitHub Actions or by pushing a `v*` tag.
