@@ -156,7 +156,7 @@ function App() {
   const metrics = useMemo(
     () => [
       {
-        label: 'Mock Service',
+        label: status.mockMode ? 'Mock Service' : 'CRD Service',
         value: status.serviceRunning ? 'Running' : 'Stopped',
         icon: status.serviceRunning ? CheckCircle2 : XCircle
       },
@@ -225,7 +225,11 @@ function App() {
         >
           <Laptop size={24} />
           <span>Allow access all the time</span>
-          <small>Mock service running with autostart enabled.</small>
+          <small>
+            {status.mockMode
+              ? 'Mock service running with autostart enabled.'
+              : 'Chrome Remote Desktop running with autostart enabled.'}
+          </small>
         </button>
         <button
           className={`mode-card ${status.mode === 'ask_to_allow' ? 'active' : ''}`}
@@ -235,7 +239,11 @@ function App() {
         >
           <LockKeyhole size={24} />
           <span>Ask to allow every time</span>
-          <small>Mock service stopped until local approval.</small>
+          <small>
+            {status.mockMode
+              ? 'Mock service stopped until local approval.'
+              : 'Chrome Remote Desktop stopped until local approval.'}
+          </small>
         </button>
       </section>
 
@@ -243,7 +251,10 @@ function App() {
         <div className="action-copy">
           <p className="eyebrow">Approval</p>
           <h2>Allow Once</h2>
-          <p>Starts a visible 60-second countdown before the mock service is marked available.</p>
+          <p>
+            Starts a visible 60-second countdown before{' '}
+            {status.mockMode ? 'mock access' : 'Chrome Remote Desktop access'} becomes available.
+          </p>
         </div>
         <div className="action-controls">
           <div className="segmented" aria-label="Approval duration">
@@ -278,7 +289,7 @@ function App() {
         </div>
       </section>
 
-      <section className="metrics-grid" aria-label="Mock service state">
+      <section className="metrics-grid" aria-label="Remote access service state">
         {metrics.map((metric) => {
           const Icon = metric.icon;
           return (
@@ -312,7 +323,7 @@ function App() {
           <div className="tray-menu">
             <span>System Tray</span>
             <button disabled={busy} onClick={() => runAction('mock_incoming_request')} type="button">
-              Mock Request
+              Test Request
             </button>
             <button disabled={busy} onClick={() => runAction('approve_once', { minutes: 15 })} type="button">
               Allow 15m

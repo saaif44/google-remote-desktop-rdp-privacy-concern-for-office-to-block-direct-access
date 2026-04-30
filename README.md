@@ -21,8 +21,10 @@ Current status:
 - Windows and macOS installer configuration.
 - Background tray behavior.
 - Launch-at-login support.
-- Mock service state only.
+- Real Windows/macOS Chrome Remote Desktop service-control adapters.
+- Mock mode remains available with `UNIGLOBE_CONTROLLER=mock`.
 
-Important: the current implementation does not run real Chrome Remote Desktop,
-`sc.exe`, or `launchctl` service commands. Real service-control adapters should
-only be added after the UI and state machine are stable.
+Important: Chrome Remote Desktop does not expose a public incoming-connection
+event API. The app controls host availability through OS service/launch agent
+state and can show a consent modal through the tray/test request flow or a future
+company integration.

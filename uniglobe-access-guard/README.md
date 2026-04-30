@@ -22,24 +22,32 @@ Chrome Remote Desktop does not expose a public incoming-request API that this ap
 - OS-specific privileged helper for production builds
 - JSONL audit log
 
-## Phase 1 status
+## Current status
 
-The app currently runs against an in-memory mock Chrome Remote Desktop service state.
-No `sc.exe`, `launchctl`, or Chrome Remote Desktop commands are executed by the active
-Tauri backend.
+The app now uses real Chrome Remote Desktop service control on supported desktop
+platforms:
+
+- Windows: controls the `chromoting` service with `sc.exe`.
+- macOS: controls `org.chromium.chromoting` with `launchctl`.
+
+Set `UNIGLOBE_CONTROLLER=mock` to force the in-memory mock controller for tests
+or demos.
 
 Implemented in this phase:
 
 - React dashboard with mode controls, approval actions, countdown modal, settings, and audit log.
 - Tauri command API for `get_status`, `set_mode`, `approve_once`,
-  `approve_until_revoked`, `terminate_now`, `get_audit_log`, and mock incoming requests.
-- Rust mock controller and state-machine tests.
+  `approve_until_revoked`, `terminate_now`, `get_audit_log`, and test incoming requests.
+- Rust mock controller, real Windows/macOS controllers, and state-machine tests.
 - Background tray behavior: closing the window hides it, while the app keeps running.
 - Launch-at-login support for installed desktop builds.
-- Mock incoming-request flow that brings the window forward and shows a consent modal.
+- Test incoming-request flow that brings the window forward and shows a consent modal.
 - Installer configuration for macOS `.app`/`.dmg` and Windows NSIS `.exe`/WiX `.msi`.
-- Placeholder Windows/macOS controller structs that intentionally return errors until
-  the real service-control phase begins.
+
+Important: Chrome Remote Desktop does not expose a public incoming-connection
+event API, so the app cannot automatically detect every real incoming request
+from CRD itself. The consent modal can be opened by the tray/test request flow
+or a future company portal/integration.
 
 ## Run and build
 
@@ -82,7 +90,7 @@ Run backend tests:
 
 ```bash
 cd src-tauri
-cargo test
+UNIGLOBE_CONTROLLER=mock cargo test
 ```
 
 ## Docs

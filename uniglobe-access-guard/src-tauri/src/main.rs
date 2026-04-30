@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::{path::Path, process::Command, sync::Mutex, thread, time::Duration as StdDuration};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -76,7 +76,11 @@ struct IncomingRequest {
     requested_at: DateTime<Utc>,
 }
 
-trait RemoteDesktopController {
+trait RemoteDesktopController: Send {
+    fn name(&self) -> &'static str;
+    fn is_mock(&self) -> bool {
+        false
+    }
     fn status(&self) -> Result<ServiceStatus, String>;
     fn enable_autostart(&self) -> Result<(), String>;
     fn disable_autostart(&self) -> Result<(), String>;
@@ -110,6 +114,14 @@ impl MockRemoteDesktopController {
 }
 
 impl RemoteDesktopController for MockRemoteDesktopController {
+    fn name(&self) -> &'static str {
+        "mock"
+    }
+
+    fn is_mock(&self) -> bool {
+        true
+    }
+
     fn status(&self) -> Result<ServiceStatus, String> {
         self.service
             .lock()
@@ -134,30 +146,80 @@ impl RemoteDesktopController for MockRemoteDesktopController {
     }
 }
 
+fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to run {program}: {error}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if output.status.success() {
+        Ok(stdout)
+    } else {
+        let detail = [stdout, stderr]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Err(format!("{program} {} failed: {detail}", args.join(" ")))
+    }
+}
+
+fn run_cmd_allowing(program: &str, args: &[&str], allowed_error: &str) -> Result<String, String> {
+    match run_cmd(program, args) {
+        Ok(output) => Ok(output),
+        Err(error) if error.to_lowercase().contains(allowed_error) => Ok(error),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(target_os = "windows")]
 #[allow(dead_code)]
 struct WindowsCrdController;
 
 #[cfg(target_os = "windows")]
 impl RemoteDesktopController for WindowsCrdController {
+    fn name(&self) -> &'static str {
+        "windows_chromoting_service"
+    }
+
     fn status(&self) -> Result<ServiceStatus, String> {
-        Err("Windows CRD service control is intentionally disabled in the mock phase".into())
+        let query = run_cmd("sc.exe", &["query", "chromoting"])?;
+        let config = run_cmd("sc.exe", &["qc", "chromoting"])?;
+        Ok(ServiceStatus {
+            running: query.to_uppercase().contains("RUNNING"),
+            autostart_enabled: config.to_uppercase().contains("AUTO_START"),
+        })
     }
 
     fn enable_autostart(&self) -> Result<(), String> {
-        Err("Windows CRD service control is intentionally disabled in the mock phase".into())
+        run_cmd("sc.exe", &["config", "chromoting", "start=", "auto"])?;
+        Ok(())
     }
 
     fn disable_autostart(&self) -> Result<(), String> {
-        Err("Windows CRD service control is intentionally disabled in the mock phase".into())
+        run_cmd("sc.exe", &["config", "chromoting", "start=", "disabled"])?;
+        Ok(())
     }
 
     fn start(&self) -> Result<(), String> {
-        Err("Windows CRD service control is intentionally disabled in the mock phase".into())
+        let config = run_cmd("sc.exe", &["qc", "chromoting"])?;
+        if config.to_uppercase().contains("DISABLED") {
+            run_cmd("sc.exe", &["config", "chromoting", "start=", "demand"])?;
+        }
+        if !self.status()?.running {
+            run_cmd_allowing("sc.exe", &["start", "chromoting"], "already been started")?;
+        }
+        Ok(())
     }
 
     fn stop(&self) -> Result<(), String> {
-        Err("Windows CRD service control is intentionally disabled in the mock phase".into())
+        if self.status()?.running {
+            run_cmd_allowing("sc.exe", &["stop", "chromoting"], "has not been started")?;
+        }
+        Ok(())
     }
 }
 
@@ -167,25 +229,115 @@ struct MacCrdController;
 
 #[cfg(target_os = "macos")]
 impl RemoteDesktopController for MacCrdController {
+    fn name(&self) -> &'static str {
+        "macos_chromoting_launchagent"
+    }
+
     fn status(&self) -> Result<ServiceStatus, String> {
-        Err("macOS CRD launchctl control is intentionally disabled in the mock phase".into())
+        verify_macos_plist()?;
+        let uid = macos_uid()?;
+        let target = macos_launch_target(&uid);
+        let domain = macos_launch_domain(&uid);
+        let running = run_cmd("launchctl", &["print", &target])
+            .map(|output| output.contains("state = running") || output.contains("pid ="))
+            .unwrap_or(false);
+        let disabled = run_cmd("launchctl", &["print-disabled", &domain])
+            .map(|output| {
+                output.lines().any(|line| {
+                    line.contains("org.chromium.chromoting") && line.contains("=> disabled")
+                })
+            })
+            .unwrap_or(false);
+        Ok(ServiceStatus {
+            running,
+            autostart_enabled: !disabled,
+        })
     }
 
     fn enable_autostart(&self) -> Result<(), String> {
-        Err("macOS CRD launchctl control is intentionally disabled in the mock phase".into())
+        verify_macos_plist()?;
+        let uid = macos_uid()?;
+        let target = macos_launch_target(&uid);
+        let domain = macos_launch_domain(&uid);
+        let _ = run_cmd("launchctl", &["enable", &target]);
+        run_cmd_allowing(
+            "launchctl",
+            &["bootstrap", &domain, MACOS_CHROMOTING_PLIST],
+            "already bootstrapped",
+        )?;
+        Ok(())
     }
 
     fn disable_autostart(&self) -> Result<(), String> {
-        Err("macOS CRD launchctl control is intentionally disabled in the mock phase".into())
+        verify_macos_plist()?;
+        let uid = macos_uid()?;
+        let target = macos_launch_target(&uid);
+        let domain = macos_launch_domain(&uid);
+        let _ = run_cmd("launchctl", &["bootout", &domain, MACOS_CHROMOTING_PLIST]);
+        let _ = run_cmd("launchctl", &["disable", &target]);
+        Ok(())
     }
 
     fn start(&self) -> Result<(), String> {
-        Err("macOS CRD launchctl control is intentionally disabled in the mock phase".into())
+        verify_macos_plist()?;
+        let uid = macos_uid()?;
+        let target = macos_launch_target(&uid);
+        self.enable_autostart()?;
+        run_cmd("launchctl", &["kickstart", "-k", &target])?;
+        Ok(())
     }
 
     fn stop(&self) -> Result<(), String> {
-        Err("macOS CRD launchctl control is intentionally disabled in the mock phase".into())
+        verify_macos_plist()?;
+        let uid = macos_uid()?;
+        let domain = macos_launch_domain(&uid);
+        let _ = run_cmd("launchctl", &["bootout", &domain, MACOS_CHROMOTING_PLIST]);
+        Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+const MACOS_CHROMOTING_PLIST: &str = "/Library/LaunchAgents/org.chromium.chromoting.plist";
+
+#[cfg(target_os = "macos")]
+fn verify_macos_plist() -> Result<(), String> {
+    if Path::new(MACOS_CHROMOTING_PLIST).exists() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Chrome Remote Desktop LaunchAgent plist was not found at {MACOS_CHROMOTING_PLIST}"
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_uid() -> Result<String, String> {
+    run_cmd("id", &["-u"]).map(|uid| uid.trim().to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_launch_domain(uid: &str) -> String {
+    format!("gui/{uid}")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_launch_target(uid: &str) -> String {
+    format!("{}/org.chromium.chromoting", macos_launch_domain(uid))
+}
+
+#[cfg(target_os = "windows")]
+fn default_controller() -> Box<dyn RemoteDesktopController> {
+    Box::new(WindowsCrdController)
+}
+
+#[cfg(target_os = "macos")]
+fn default_controller() -> Box<dyn RemoteDesktopController> {
+    Box::new(MacCrdController)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn default_controller() -> Box<dyn RemoteDesktopController> {
+    Box::new(MockRemoteDesktopController::new())
 }
 
 #[derive(Debug, Clone)]
@@ -205,11 +357,10 @@ impl CountdownApproval {
     }
 }
 
-#[derive(Debug)]
 struct GuardMachine {
     mode: Mode,
     state: AccessState,
-    controller: MockRemoteDesktopController,
+    controller: Box<dyn RemoteDesktopController>,
     countdown: Option<CountdownApproval>,
     approved_until: Option<DateTime<Utc>>,
     incoming_request: Option<IncomingRequest>,
@@ -219,23 +370,70 @@ struct GuardMachine {
 
 impl GuardMachine {
     fn new(now: DateTime<Utc>) -> Self {
+        if std::env::var("UNIGLOBE_CONTROLLER")
+            .map(|value| value.eq_ignore_ascii_case("mock"))
+            .unwrap_or(false)
+        {
+            return Self::new_mock(now);
+        }
+
+        Self::new_with_controller(now, default_controller())
+    }
+
+    fn new_mock(now: DateTime<Utc>) -> Self {
+        Self::new_with_controller(now, Box::new(MockRemoteDesktopController::new()))
+    }
+
+    fn new_with_controller(
+        now: DateTime<Utc>,
+        controller: Box<dyn RemoteDesktopController>,
+    ) -> Self {
+        let is_mock = controller.is_mock();
+        let controller_name = controller.name();
+        let mut state = AccessState::Blocked;
+        let mut message = if is_mock {
+            "Mock service state is active. No Chrome Remote Desktop commands will run.".to_string()
+        } else {
+            format!(
+                "System controller active: {controller_name}. Ask to Allow is enforced by default."
+            )
+        };
+
+        if !is_mock {
+            match controller
+                .stop()
+                .and_then(|_| controller.disable_autostart())
+            {
+                Ok(()) => {
+                    message =
+                        "Ask to Allow is active. Chrome Remote Desktop was stopped and disabled."
+                            .to_string();
+                }
+                Err(error) => {
+                    state = AccessState::Error;
+                    message = format!("Unable to enforce Ask to Allow on startup: {error}");
+                }
+            }
+        }
+
         let mut machine = Self {
             mode: Mode::AskToAllow,
-            state: AccessState::Blocked,
-            controller: MockRemoteDesktopController::new(),
+            state,
+            controller,
             countdown: None,
             approved_until: None,
             incoming_request: None,
-            message: Some(
-                "Mock service state is active. No Chrome Remote Desktop commands will run."
-                    .to_string(),
-            ),
+            message: Some(message),
             audit_log: Vec::new(),
         };
         machine.audit(
             now,
             "app_started",
-            "Started with mock service state",
+            if is_mock {
+                "Started with mock service state"
+            } else {
+                "Started with system service controller"
+            },
             None,
             None,
         );
@@ -254,8 +452,10 @@ impl GuardMachine {
                 self.countdown = None;
 
                 let message = match countdown.duration_minutes {
-                    Some(minutes) => format!("Mock access is allowed for {minutes} minutes."),
-                    None => "Mock access is allowed until revoked.".to_string(),
+                    Some(minutes) => {
+                        format!("{} is allowed for {minutes} minutes.", self.access_label())
+                    }
+                    None => format!("{} is allowed until revoked.", self.access_label()),
                 };
                 self.message = Some(message.clone());
                 self.audit(
@@ -277,8 +477,10 @@ impl GuardMachine {
                     }
                     self.approved_until = None;
                     self.state = AccessState::Blocked;
-                    self.message = Some("Mock access expired and returned to blocked.".to_string());
-                    self.audit(now, "access_expired", "Mock access expired", None, None);
+                    let message =
+                        format!("{} expired and returned to blocked.", self.access_label());
+                    self.message = Some(message.clone());
+                    self.audit(now, "access_expired", &message, None, None);
                 }
             }
         }
@@ -287,10 +489,17 @@ impl GuardMachine {
     }
 
     fn status(&self, now: DateTime<Utc>) -> Result<StatusDto, String> {
-        let service = self.controller.status()?;
+        let (service, state, message) = match self.controller.status() {
+            Ok(service) => (service, self.state, self.message.clone()),
+            Err(error) => (
+                ServiceStatus::blocked(),
+                AccessState::Error,
+                Some(format!("{} status error: {error}", self.controller.name())),
+            ),
+        };
         Ok(StatusDto {
             mode: self.mode,
-            state: self.state,
+            state,
             service_running: service.running,
             autostart_enabled: service.autostart_enabled,
             approved_until: self.approved_until.map(|ts| ts.to_rfc3339()),
@@ -306,8 +515,8 @@ impl GuardMachine {
                 .incoming_request
                 .as_ref()
                 .map(|request| request.requested_at.to_rfc3339()),
-            message: self.message.clone(),
-            mock_mode: true,
+            message,
+            mock_mode: self.controller.is_mock(),
         })
     }
 
@@ -322,17 +531,19 @@ impl GuardMachine {
                 self.controller.enable_autostart()?;
                 self.controller.start()?;
                 self.state = AccessState::Enabled;
-                self.message = Some(
-                    "Mock Always Allow mode: service is marked running and set to autostart."
-                        .to_string(),
-                );
+                self.message = Some(format!(
+                    "Always Allow mode: {} is running and set to autostart.",
+                    self.access_label()
+                ));
             }
             Mode::AskToAllow => {
                 self.controller.stop()?;
                 self.controller.disable_autostart()?;
                 self.state = AccessState::Blocked;
-                self.message =
-                    Some("Mock Ask to Allow mode: service is marked stopped and disabled.".into());
+                self.message = Some(format!(
+                    "Ask to Allow mode: {} is stopped and disabled.",
+                    self.access_label()
+                ));
             }
         }
 
@@ -357,11 +568,12 @@ impl GuardMachine {
         }
 
         self.incoming_request = None;
-        self.start_countdown(Some(minutes), countdown_seconds, now);
+        self.start_countdown(Some(minutes), countdown_seconds, now)?;
+        let message = format!("Approved {} for {minutes} minutes", self.access_label());
         self.audit(
             now,
             "access_approved",
-            &format!("Approved mock access for {minutes} minutes"),
+            &message,
             Some(minutes),
             Some(countdown_seconds),
         );
@@ -374,11 +586,12 @@ impl GuardMachine {
         now: DateTime<Utc>,
     ) -> Result<(), String> {
         self.incoming_request = None;
-        self.start_countdown(None, countdown_seconds, now);
+        self.start_countdown(None, countdown_seconds, now)?;
+        let message = format!("Approved {} until revoked", self.access_label());
         self.audit(
             now,
             "access_approved_until_revoked",
-            "Approved mock access until revoked",
+            &message,
             None,
             Some(countdown_seconds),
         );
@@ -394,28 +607,20 @@ impl GuardMachine {
             self.controller.disable_autostart()?;
         }
         self.state = AccessState::Blocked;
-        self.message = Some(
-            "Mock access terminated. No Chrome Remote Desktop service command was run.".to_string(),
-        );
-        self.audit(
-            now,
-            "access_terminated",
-            "Mock access terminated",
-            None,
-            None,
-        );
+        let message = format!("{} terminated.", self.access_label());
+        self.message = Some(message.clone());
+        self.audit(now, "access_terminated", &message, None, None);
         Ok(())
     }
 
     fn incoming_request(&mut self, now: DateTime<Utc>) {
         self.incoming_request = Some(IncomingRequest { requested_at: now });
-        self.message = Some(
-            "Mock incoming remote access request. App window was brought forward.".to_string(),
-        );
+        self.message =
+            Some("Incoming remote access request. App window was brought forward.".into());
         self.audit(
             now,
             "incoming_request",
-            "Mock incoming remote access request",
+            "Incoming remote access request",
             None,
             None,
         );
@@ -426,8 +631,8 @@ impl GuardMachine {
         duration_minutes: Option<u32>,
         countdown_seconds: u32,
         now: DateTime<Utc>,
-    ) {
-        self.controller.stop().ok();
+    ) -> Result<(), String> {
+        self.controller.stop()?;
         self.state = AccessState::Countdown;
         self.countdown = Some(CountdownApproval {
             started_at: now,
@@ -435,10 +640,19 @@ impl GuardMachine {
             countdown_seconds,
         });
         self.approved_until = None;
-        self.message = Some(
-            "Mock countdown active. Remote access will be marked allowed when it reaches zero."
-                .to_string(),
-        );
+        self.message = Some(format!(
+            "Countdown active. {} will start when it reaches zero.",
+            self.access_label()
+        ));
+        Ok(())
+    }
+
+    fn access_label(&self) -> &'static str {
+        if self.controller.is_mock() {
+            "mock access"
+        } else {
+            "Chrome Remote Desktop access"
+        }
     }
 
     fn audit(
@@ -461,7 +675,6 @@ impl GuardMachine {
     }
 }
 
-#[derive(Debug)]
 struct AppState {
     machine: Mutex<GuardMachine>,
 }
@@ -511,6 +724,15 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+fn schedule_reconcile(app: &AppHandle, seconds: u64) {
+    let app = app.clone();
+    thread::spawn(move || {
+        thread::sleep(StdDuration::from_secs(seconds));
+        let state = app.state::<AppState>();
+        let _ = with_machine_state(state.inner(), |_machine, _now| Ok(()));
+    });
+}
+
 #[tauri::command]
 fn get_status(state: tauri::State<'_, AppState>) -> Result<StatusDto, String> {
     with_machine(state, |machine, now| machine.status(now))
@@ -525,19 +747,34 @@ fn set_mode(mode: Mode, state: tauri::State<'_, AppState>) -> Result<StatusDto, 
 }
 
 #[tauri::command]
-fn approve_once(minutes: u32, state: tauri::State<'_, AppState>) -> Result<StatusDto, String> {
-    with_machine(state, |machine, now| {
+fn approve_once(
+    minutes: u32,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<StatusDto, String> {
+    let status = with_machine(state, |machine, now| {
         machine.approve_once(minutes, DEFAULT_COUNTDOWN_SECONDS, now)?;
         machine.status(now)
-    })
+    })?;
+    schedule_reconcile(&app, DEFAULT_COUNTDOWN_SECONDS as u64);
+    schedule_reconcile(
+        &app,
+        DEFAULT_COUNTDOWN_SECONDS as u64 + (minutes as u64 * 60) + 1,
+    );
+    Ok(status)
 }
 
 #[tauri::command]
-fn approve_until_revoked(state: tauri::State<'_, AppState>) -> Result<StatusDto, String> {
-    with_machine(state, |machine, now| {
+fn approve_until_revoked(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<StatusDto, String> {
+    let status = with_machine(state, |machine, now| {
         machine.approve_until_revoked(DEFAULT_COUNTDOWN_SECONDS, now)?;
         machine.status(now)
-    })
+    })?;
+    schedule_reconcile(&app, DEFAULT_COUNTDOWN_SECONDS as u64);
+    Ok(status)
 }
 
 #[tauri::command]
@@ -588,7 +825,7 @@ fn main() {
 
             let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
             let incoming =
-                MenuItem::with_id(app, "incoming", "Mock Incoming Request", true, None::<&str>)?;
+                MenuItem::with_id(app, "incoming", "Test Incoming Request", true, None::<&str>)?;
             let allow_15 =
                 MenuItem::with_id(app, "allow_15", "Allow 15 minutes", true, None::<&str>)?;
             let terminate = MenuItem::with_id(app, "terminate", "Terminate", true, None::<&str>)?;
@@ -617,6 +854,8 @@ fn main() {
                             machine.approve_once(15, DEFAULT_COUNTDOWN_SECONDS, now)?;
                             Ok(())
                         });
+                        schedule_reconcile(app, DEFAULT_COUNTDOWN_SECONDS as u64);
+                        schedule_reconcile(app, DEFAULT_COUNTDOWN_SECONDS as u64 + (15 * 60) + 1);
                     }
                     "terminate" => {
                         let state = app.state::<AppState>();
@@ -664,7 +903,7 @@ mod tests {
 
     #[test]
     fn ask_to_allow_starts_blocked() {
-        let machine = GuardMachine::new(at(0));
+        let machine = GuardMachine::new_mock(at(0));
         let status = machine.status(at(0)).unwrap();
 
         assert_eq!(status.mode, Mode::AskToAllow);
@@ -675,7 +914,7 @@ mod tests {
 
     #[test]
     fn always_allow_marks_mock_service_running() {
-        let mut machine = GuardMachine::new(at(0));
+        let mut machine = GuardMachine::new_mock(at(0));
         machine.set_mode(Mode::AlwaysAllow, at(1)).unwrap();
         let status = machine.status(at(1)).unwrap();
 
@@ -686,7 +925,7 @@ mod tests {
 
     #[test]
     fn approve_once_waits_for_countdown_before_starting_mock_service() {
-        let mut machine = GuardMachine::new(at(0));
+        let mut machine = GuardMachine::new_mock(at(0));
         machine.approve_once(30, 10, at(1)).unwrap();
 
         let before = machine.status(at(5)).unwrap();
@@ -703,7 +942,7 @@ mod tests {
 
     #[test]
     fn temporary_approval_expires_back_to_blocked_in_ask_mode() {
-        let mut machine = GuardMachine::new(at(0));
+        let mut machine = GuardMachine::new_mock(at(0));
         machine.approve_once(1, 1, at(1)).unwrap();
 
         machine.reconcile(at(2)).unwrap();
@@ -718,7 +957,7 @@ mod tests {
 
     #[test]
     fn terminate_cancels_countdown_without_starting_service() {
-        let mut machine = GuardMachine::new(at(0));
+        let mut machine = GuardMachine::new_mock(at(0));
         machine.approve_until_revoked(10, at(1)).unwrap();
         machine.terminate_now(at(2)).unwrap();
 
@@ -730,7 +969,7 @@ mod tests {
 
     #[test]
     fn incoming_request_is_visible_in_status() {
-        let mut machine = GuardMachine::new(at(0));
+        let mut machine = GuardMachine::new_mock(at(0));
         machine.incoming_request(at(4));
         let status = machine.status(at(4)).unwrap();
 
@@ -741,7 +980,7 @@ mod tests {
 
     #[test]
     fn approving_request_clears_incoming_request() {
-        let mut machine = GuardMachine::new(at(0));
+        let mut machine = GuardMachine::new_mock(at(0));
         machine.incoming_request(at(4));
         machine.approve_once(15, 10, at(5)).unwrap();
         let status = machine.status(at(5)).unwrap();

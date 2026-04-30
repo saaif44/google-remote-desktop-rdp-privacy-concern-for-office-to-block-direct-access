@@ -3,11 +3,16 @@
 UniGlobe Access Guard is configured as a Tauri v2 desktop app for Windows and
 macOS.
 
-## Current safety status
+## Current service-control status
 
-This installer-ready build still uses mock Chrome Remote Desktop service state.
-It does not run `sc.exe`, `launchctl`, or any Chrome Remote Desktop service
-command.
+This installer-ready build uses real Chrome Remote Desktop service control on
+supported platforms:
+
+- Windows uses `sc.exe` to query/configure/start/stop the `chromoting` service.
+- macOS uses `launchctl` to bootstrap/bootout/kickstart
+  `org.chromium.chromoting`.
+
+Set `UNIGLOBE_CONTROLLER=mock` to force mock service state for demos or tests.
 
 ## Background behavior
 
@@ -57,6 +62,9 @@ Expected artifacts:
 The Windows installer uses WebView2's download bootstrapper. Production
 distribution should use an Authenticode code-signing certificate and a timestamp
 server.
+
+Chrome Remote Desktop service-control commands may require administrator rights
+or an installed privileged helper depending on local machine policy.
 
 ## CI
 
