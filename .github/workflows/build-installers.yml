@@ -18,7 +18,7 @@ jobs:
     name: macOS DMG
     runs-on: macos-latest
     env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
+      CARGO_TARGET_DIR: /tmp/cargo-target
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,8 +46,8 @@ jobs:
         with:
           name: uniglobe-access-guard-macos
           path: |
-            ${{ runner.temp }}/cargo-target/universal-apple-darwin/release/bundle/dmg/*.dmg
-            ${{ runner.temp }}/cargo-target/universal-apple-darwin/release/bundle/macos/*.app
+            /tmp/cargo-target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            /tmp/cargo-target/universal-apple-darwin/release/bundle/macos/*.app
 
   windows:
     name: Windows NSIS and MSI
