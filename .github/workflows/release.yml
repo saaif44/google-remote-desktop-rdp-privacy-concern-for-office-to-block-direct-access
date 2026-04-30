@@ -29,6 +29,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Workaround for Windows long path issues
+        if: matrix.platform == 'windows-latest'
+        run: echo "CARGO_TARGET_DIR=D:\t" >> $env:GITHUB_ENV
+
       - name: Install Ubuntu Dependencies
         if: matrix.platform == 'ubuntu-latest'
         run: |
